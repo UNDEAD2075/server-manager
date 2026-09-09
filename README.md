@@ -1,5 +1,4 @@
-<img width="1280" height="878" alt="Снимок экрана_20260910_001847" src="https://github.com/user-attachments/assets/62afe2e4-0304-4ce2-b929-4ff2baff0d32" />
-
+<img width="1152" height="750" alt="Снимок экрана_20260910_001847" src="https://github.com/user-attachments/assets/0b8d9bb4-3b26-4365-b37a-f93a84f0ef92" />
 
 # Server Manager (Qt Terminal GUI)
 
