@@ -1,3 +1,5 @@
+<img width="1280" height="878" alt="Снимок экрана_20260910_001847" src="https://github.com/user-attachments/assets/a7ca297b-c6f2-49f9-9387-5f88e48e25ba" />
+
 # Server Manager (Qt Terminal GUI)
 
 Легковесный графический менеджер серверов и фоновых служб на Python (PyQt6 + TTY/pyte) для Arch Linux. Разработан для удобного параллельного запуска локальных LLM-инференсов (`llama-server`, `FastFlowLM`), WebUI-интерфейсов, парсеров, прокси и произвольных CLI-утилит.
