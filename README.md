@@ -45,7 +45,7 @@
 
 1. Клонируйте репозиторий:
    ```bash
-   git clone https://github.com/username/server-manager.git
+   git clone https://github.com/UNDEAD2075/server-manager.git
    cd server-manager
    
 2. Выдайте права на исполнение и запустите скрипт установки:
