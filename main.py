@@ -13,6 +13,7 @@ import pyte
 
 PROFILES_DIR = os.path.expanduser("~/.config/server_manager_clean_profiles")
 CONFIG_FILE = os.path.expanduser("~/.config/server_manager_clean.json")
+AUTOSTART_DESKTOP = os.path.expanduser("~/.config/autostart/server-manager-clean.desktop")
 
 def make_status_icon(running: bool) -> QtGui.QIcon:
     pix = QtGui.QPixmap(14, 14)
@@ -308,8 +309,82 @@ class ServerConfigDialog(QtWidgets.QDialog):
             "bg_image": self.bg_edit.text().strip(),
         }
 
+class IconsConfigDialog(QtWidgets.QDialog):
+    def __init__(self, icons_data, parent=None):
+        super().__init__(parent)
+        self.setWindowTitle("Настройка иконок приложения")
+        self.resize(520, 220)
+        self.icons = dict(icons_data)
+
+        layout = QtWidgets.QFormLayout(self)
+
+        self.preview_window = QtWidgets.QLabel()
+        self.preview_window.setFixedSize(28, 28)
+        self.preview_tray = QtWidgets.QLabel()
+        self.preview_tray.setFixedSize(28, 28)
+        self.preview_panel = QtWidgets.QLabel()
+        self.preview_panel.setFixedSize(28, 28)
+
+        layout.addRow("Иконка окна:", self._create_row("window", self.preview_window))
+        layout.addRow("Иконка трея:", self._create_row("tray", self.preview_tray))
+        layout.addRow("Иконка панели KDE:", self._create_row("panel", self.preview_panel))
+
+        self.update_previews()
+
+        buttons = QtWidgets.QDialogButtonBox(QtWidgets.QDialogButtonBox.StandardButton.Ok | QtWidgets.QDialogButtonBox.StandardButton.Cancel)
+        buttons.accepted.connect(self.accept)
+        buttons.rejected.connect(self.reject)
+        layout.addWidget(buttons)
+
+    def _create_row(self, key, preview_label):
+        box = QtWidgets.QHBoxLayout()
+        edit = QtWidgets.QLineEdit(self.icons.get(key, ""))
+        edit.setReadOnly(True)
+        setattr(self, f"edit_{key}", edit)
+
+        btn_pick = QtWidgets.QPushButton("Выбрать...")
+        btn_pick.clicked.connect(lambda: self.pick_file(key, edit, preview_label))
+        btn_reset = QtWidgets.QPushButton("Сбросить")
+        btn_reset.clicked.connect(lambda: self.reset_file(key, edit, preview_label))
+
+        box.addWidget(preview_label)
+        box.addWidget(edit)
+        box.addWidget(btn_pick)
+        box.addWidget(btn_reset)
+        widget = QtWidgets.QWidget()
+        widget.setLayout(box)
+        return widget
+
+    def pick_file(self, key, edit, preview):
+        f, _ = QtWidgets.QFileDialog.getOpenFileName(self, "Выбрать иконку", "", "Images (*.png *.ico *.svg *.xpm)")
+        if f:
+            self.icons[key] = f
+            edit.setText(f)
+            self.set_preview_pixmap(preview, f)
+
+    def reset_file(self, key, edit, preview):
+        self.icons[key] = ""
+        edit.setText("")
+        preview.setPixmap(QtGui.QPixmap())
+
+    def set_preview_pixmap(self, label, path):
+        if path and os.path.exists(path):
+            pix = QtGui.QPixmap(path).scaled(24, 24, QtCore.Qt.AspectRatioMode.KeepAspectRatio, QtCore.Qt.TransformationMode.SmoothTransformation)
+            label.setPixmap(pix)
+        else:
+            label.setPixmap(QtGui.QPixmap())
+
+    def update_previews(self):
+        self.set_preview_pixmap(self.preview_window, self.icons.get("window", ""))
+        self.set_preview_pixmap(self.preview_tray, self.icons.get("tray", ""))
+        self.set_preview_pixmap(self.preview_panel, self.icons.get("panel", ""))
+
+    def get_data(self):
+        return self.icons
+
 class ServerTab(QtWidgets.QWidget):
     status_changed = QtCore.pyqtSignal()
+    notify_message = QtCore.pyqtSignal(str, str)
 
     def __init__(self, config, parent=None):
         super().__init__(parent)
@@ -356,6 +431,7 @@ class ServerTab(QtWidgets.QWidget):
         if self.is_running():
             return
         cmd = self.config.get("cmd", "")
+        name = self.config.get("name", "Сервер")
         if not cmd:
             self.terminal.feed_bytes(b"[ERROR] Command not specified\r\n")
             return
@@ -399,6 +475,7 @@ class ServerTab(QtWidgets.QWidget):
             self.notifier = QtCore.QSocketNotifier(master, QtCore.QSocketNotifier.Type.Read, self)
             self.notifier.activated.connect(self.handle_stdout)
             self.status_changed.emit()
+            self.notify_message.emit("Сервер запущен", f"{name} успешно запущен")
 
     def handle_stdout(self):
         try:
@@ -406,17 +483,18 @@ class ServerTab(QtWidgets.QWidget):
             if data:
                 self.terminal.feed_bytes(data)
             else:
-                self.cleanup_child()
+                self.cleanup_child(notify=True)
         except OSError:
-            self.cleanup_child()
+            self.cleanup_child(notify=True)
 
-    def stop_server(self, timeout=2.5):
+    def stop_server(self, timeout=2.5, notify=True):
         if not self.is_running():
             return
+        name = self.config.get("name", "Сервер")
         try:
             os.kill(self.pid, signal.SIGTERM)
         except OSError:
-            self.cleanup_child()
+            self.cleanup_child(notify=notify)
             return
 
         start_t = time.time()
@@ -424,7 +502,7 @@ class ServerTab(QtWidgets.QWidget):
             res, _ = os.waitpid(self.pid, os.WNOHANG)
             if res != 0:
                 self.pid = None
-                self.cleanup_child()
+                self.cleanup_child(notify=notify)
                 return
             time.sleep(0.05)
 
@@ -433,13 +511,15 @@ class ServerTab(QtWidgets.QWidget):
             os.waitpid(self.pid, 0)
         except OSError:
             pass
-        self.cleanup_child()
+        self.cleanup_child(notify=notify)
 
     def restart_server(self):
-        self.stop_server()
+        self.stop_server(notify=False)
         QtCore.QTimer.singleShot(400, self.start_server)
 
-    def cleanup_child(self):
+    def cleanup_child(self, notify=False):
+        name = self.config.get("name", "Сервер")
+        was_running = self.pid is not None
         if self.notifier:
             self.notifier.setEnabled(False)
             self.notifier = None
@@ -456,6 +536,8 @@ class ServerTab(QtWidgets.QWidget):
                 pass
             self.pid = None
         self.status_changed.emit()
+        if notify and was_running:
+            self.notify_message.emit("Сервер остановлен", f"{name} остановлен")
 
     def open_settings(self, rename_callback=None):
         dlg = ServerConfigDialog(self.config, self)
@@ -583,7 +665,6 @@ class DraggableTabButton(QtWidgets.QPushButton):
         """)
 
     def sizeHint(self):
-        # Рассчитываем размер по метрикам жирного шрифта с запасом, чтобы текст не обрезался
         bold_font = QtGui.QFont(self.font())
         bold_font.setBold(True)
         bold_font.setPointSize(9)
@@ -749,6 +830,15 @@ class MainWindow(QtWidgets.QMainWindow):
         self.autoscroll_enabled = True
         self.show_button_text = True
         self.force_exit_flag = False
+        self.autostart_enabled = False
+        self.start_minimized = False
+        self.notifications_enabled = True
+
+        self.custom_icons = {
+            "window": "",
+            "tray": "",
+            "panel": ""
+        }
 
         self.tabs = MultiRowTabWidget(self)
         self.tabs.tabCloseRequested.connect(self.close_tab)
@@ -758,6 +848,21 @@ class MainWindow(QtWidgets.QMainWindow):
         self.create_menu()
         self.create_tray()
         self.load_state()
+
+    def show_about_dialog(self):
+        title = "О программе Server Manager"
+        text = """<h3>Server Manager v1.0</h3>
+        <p>Менеджер локальных серверов и LLM-инференсов для Arch Linux.</p>
+        <p><b>Возможности:</b></p>
+        <ul>
+            <li>Встроенный ANSI TTY-терминал с поддержкой цветов;</li>
+            <li>Плавное завершение процессов (SIGTERM/SIGKILL);</li>
+            <li>Управление профилями и системный трей;</li>
+            <li>Автозапуск и фоновый режим.</li>
+        </ul>
+        <p>Лицензия: <b>GPLv3</b></p>"""
+        QtWidgets.QMessageBox.about(self, title, text)
+
 
     def create_menu(self):
         bar = self.menuBar()
@@ -789,13 +894,15 @@ class MainWindow(QtWidgets.QMainWindow):
 
         # 3. Интерфейс
         m_view = bar.addMenu("Интерфейс")
-        act_app_icon = QtGui.QAction("Выбрать иконку окна...", self)
-        act_app_icon.triggered.connect(self.pick_app_icon)
-        m_view.addAction(act_app_icon)
+        act_icons = QtGui.QAction("Настройка иконок...", self)
+        act_icons.triggered.connect(self.open_icons_dialog)
+        m_view.addAction(act_icons)
 
-        act_tray_icon = QtGui.QAction("Выбрать иконку трея...", self)
-        act_tray_icon.triggered.connect(self.pick_tray_icon)
-        m_view.addAction(act_tray_icon)
+        # 4. О программе (ставим сразу после "Интерфейс")
+        m_help = bar.addMenu("Справка")
+        act_about = QtGui.QAction("О программе...", self)
+        act_about.triggered.connect(self.show_about_dialog)
+        m_help.addAction(act_about)
 
         self.act_btn_text = QtGui.QAction("Текст на кнопках управления", self, checkable=True)
         self.act_btn_text.setChecked(True)
@@ -807,10 +914,23 @@ class MainWindow(QtWidgets.QMainWindow):
         self.act_autoscroll.toggled.connect(self.toggle_autoscroll)
         m_view.addAction(self.act_autoscroll)
 
+        self.act_notifications = QtGui.QAction("Включить уведомления", self, checkable=True)
+        self.act_notifications.setChecked(True)
+        self.act_notifications.toggled.connect(lambda s: setattr(self, "notifications_enabled", s))
+        m_view.addAction(self.act_notifications)
+
         self.act_toggle_tray = QtGui.QAction("Включить системный трей", self, checkable=True)
         self.act_toggle_tray.setChecked(True)
         self.act_toggle_tray.toggled.connect(self.toggle_tray_visible)
         m_view.addAction(self.act_toggle_tray)
+
+        self.act_autostart = QtGui.QAction("Автозапуск с системой", self, checkable=True)
+        self.act_autostart.toggled.connect(self.toggle_autostart)
+        m_view.addAction(self.act_autostart)
+
+        self.act_start_min = QtGui.QAction("Запуск в свёрнутом виде (на панель)", self, checkable=True)
+        self.act_start_min.toggled.connect(lambda s: setattr(self, "start_minimized", s))
+        m_view.addAction(self.act_start_min)
 
         m_close = m_view.addMenu("Поведение кнопки [X]")
         self.act_close_quit = QtGui.QAction("Закрыть приложение", self, checkable=True)
@@ -840,29 +960,33 @@ class MainWindow(QtWidgets.QMainWindow):
         self.btn_start = QtWidgets.QPushButton()
         self.btn_stop = QtWidgets.QPushButton()
         self.btn_restart = QtWidgets.QPushButton()
+        self.btn_stop_all = QtWidgets.QPushButton()
         self.btn_clear = QtWidgets.QPushButton()
         self.btn_cfg = QtWidgets.QPushButton()
 
-        for b in (self.btn_start, self.btn_stop, self.btn_restart, self.btn_clear, self.btn_cfg):
+        for b in (self.btn_start, self.btn_stop, self.btn_restart, self.btn_stop_all, self.btn_clear, self.btn_cfg):
             self.nav_layout.addWidget(b)
 
-        self.nav_layout.addWidget(self.lbl_status)
+        nav_layout = self.nav_layout
+        nav_layout.addWidget(self.lbl_status)
         bar.setCornerWidget(self.nav_widget, QtCore.Qt.Corner.TopRightCorner)
 
         self.btn_start.clicked.connect(self.current_start)
         self.btn_stop.clicked.connect(self.current_stop)
         self.btn_restart.clicked.connect(self.current_restart)
+        self.btn_stop_all.clicked.connect(self.stop_all_servers)
         self.btn_clear.clicked.connect(self.current_clear)
         self.btn_cfg.clicked.connect(self.current_cfg)
 
         self.update_buttons_ui()
 
     def update_buttons_ui(self):
-        btns = (self.btn_start, self.btn_stop, self.btn_restart, self.btn_clear, self.btn_cfg)
+        btns = (self.btn_start, self.btn_stop, self.btn_restart, self.btn_stop_all, self.btn_clear, self.btn_cfg)
         if self.show_button_text:
             self.btn_start.setText("▶ Старт")
             self.btn_stop.setText("⏹ Стоп")
             self.btn_restart.setText("🔄 Перезапуск")
+            self.btn_stop_all.setText("🛑 Стоп все")
             self.btn_clear.setText("🧹 Очистить")
             self.btn_cfg.setText("⚙ Настройки")
             style = """
@@ -891,6 +1015,7 @@ class MainWindow(QtWidgets.QMainWindow):
             self.btn_start.setText("▶")
             self.btn_stop.setText("⏹")
             self.btn_restart.setText("🔄")
+            self.btn_stop_all.setText("🛑")
             self.btn_clear.setText("🧹")
             self.btn_cfg.setText("⚙")
             style = """
@@ -917,6 +1042,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self.btn_start.setToolTip("Запустить сервер (▶)")
         self.btn_stop.setToolTip("Остановить сервер (⏹)")
         self.btn_restart.setToolTip("Перезапустить сервер (🔄)")
+        self.btn_stop_all.setToolTip("Остановить все запущенные серверы (🛑)")
         self.btn_clear.setToolTip("Очистить лог терминала (🧹)")
         self.btn_cfg.setToolTip("Настройки сервера (⚙)")
 
@@ -941,6 +1067,61 @@ class MainWindow(QtWidgets.QMainWindow):
         if hasattr(self, "tray"):
             self.tray.setVisible(state)
 
+    def toggle_autostart(self, state):
+        self.autostart_enabled = state
+        os.makedirs(os.path.dirname(AUTOSTART_DESKTOP), exist_ok=True)
+        if state:
+            py_path = sys.executable
+            script_path = os.path.abspath(sys.argv[0])
+            content = f"""[Desktop Entry]
+Type=Application
+Version=1.0
+Name=Server Manager
+Comment=Qt Server Manager Autostart
+Exec={py_path} {script_path}
+Terminal=false
+StartupNotify=false
+X-GNOME-Autostart-enabled=true
+"""
+            try:
+                with open(AUTOSTART_DESKTOP, "w", encoding="utf-8") as f:
+                    f.write(content)
+            except Exception as e:
+                self.show_notification("Ошибка автозапуска", str(e))
+        else:
+            if os.path.exists(AUTOSTART_DESKTOP):
+                try:
+                    os.remove(AUTOSTART_DESKTOP)
+                except OSError:
+                    pass
+
+    def open_icons_dialog(self):
+        dlg = IconsConfigDialog(self.custom_icons, self)
+        if dlg.exec():
+            self.custom_icons = dlg.get_data()
+            self.apply_icons()
+
+    def apply_icons(self):
+        w_icon = self.custom_icons.get("window", "")
+        if w_icon and os.path.exists(w_icon):
+            self.setWindowIcon(QtGui.QIcon(w_icon))
+        else:
+            p_icon = self.custom_icons.get("panel", "")
+            if p_icon and os.path.exists(p_icon):
+                self.setWindowIcon(QtGui.QIcon(p_icon))
+            else:
+                self.setWindowIcon(QtGui.QIcon())
+
+        t_icon = self.custom_icons.get("tray", "")
+        if t_icon and os.path.exists(t_icon):
+            self.tray.setIcon(QtGui.QIcon(t_icon))
+        else:
+            self.tray.setIcon(self.style().standardIcon(QtWidgets.QStyle.StandardPixmap.SP_ComputerIcon))
+
+    def show_notification(self, title, msg):
+        if self.notifications_enabled and hasattr(self, "tray") and self.tray.isVisible():
+            self.tray.showMessage(title, msg, QtWidgets.QSystemTrayIcon.MessageIcon.Information, 2500)
+
     def current_tab(self):
         w = self.tabs.currentWidget()
         return w if isinstance(w, ServerTab) else None
@@ -956,6 +1137,17 @@ class MainWindow(QtWidgets.QMainWindow):
     def current_restart(self):
         t = self.current_tab()
         if t: t.restart_server()
+
+    def stop_all_servers(self):
+        stopped_count = 0
+        for i in range(self.tabs.count()):
+            w = self.tabs.widget(i)
+            if isinstance(w, ServerTab) and w.is_running():
+                w.stop_server(timeout=1.5, notify=False)
+                stopped_count += 1
+        self.update_tray_tooltip()
+        if stopped_count > 0:
+            self.show_notification("Остановка серверов", f"Остановлено серверов: {stopped_count}")
 
     def current_clear(self):
         t = self.current_tab()
@@ -988,6 +1180,9 @@ class MainWindow(QtWidgets.QMainWindow):
         menu = QtWidgets.QMenu()
         act_restore = menu.addAction("Развернуть")
         act_restore.triggered.connect(self.showNormal)
+        act_stop_all = menu.addAction("Остановить все сервера")
+        act_stop_all.triggered.connect(self.stop_all_servers)
+        menu.addSeparator()
         act_exit = menu.addAction("Выход")
         act_exit.triggered.connect(self.force_exit)
         self.tray.setContextMenu(menu)
@@ -997,7 +1192,7 @@ class MainWindow(QtWidgets.QMainWindow):
 
     def on_tray_activated(self, reason):
         if reason == QtWidgets.QSystemTrayIcon.ActivationReason.Trigger:
-            if self.isVisible():
+            if self.isVisible() and not self.isMinimized():
                 self.hide()
             else:
                 self.showNormal()
@@ -1006,14 +1201,6 @@ class MainWindow(QtWidgets.QMainWindow):
     def force_exit(self):
         self.force_exit_flag = True
         self.close()
-
-    def pick_app_icon(self):
-        f, _ = QtWidgets.QFileDialog.getOpenFileName(self, "Выбрать иконку окна", "", "Images (*.png *.ico *.svg)")
-        if f: self.setWindowIcon(QtGui.QIcon(f))
-
-    def pick_tray_icon(self):
-        f, _ = QtWidgets.QFileDialog.getOpenFileName(self, "Выбрать иконку трея", "", "Images (*.png *.ico *.svg)")
-        if f: self.tray.setIcon(QtGui.QIcon(f))
 
     def update_tray_tooltip(self):
         running = []
@@ -1034,6 +1221,7 @@ class MainWindow(QtWidgets.QMainWindow):
         tab = ServerTab(cfg, self.tabs)
         tab.set_autoscroll(self.autoscroll_enabled)
         tab.status_changed.connect(self.update_tray_tooltip)
+        tab.notify_message.connect(self.show_notification)
         idx = self.tabs.addTab(tab, cfg.get("name", "Сервер"))
         self.tabs.update_tab_status(idx, tab.is_running())
 
@@ -1045,7 +1233,7 @@ class MainWindow(QtWidgets.QMainWindow):
     def close_tab(self, idx):
         w = self.tabs.widget(idx)
         if isinstance(w, ServerTab):
-            w.stop_server()
+            w.stop_server(notify=False)
         self.tabs.removeTab(idx)
         self.update_tray_tooltip()
 
@@ -1065,7 +1253,7 @@ class MainWindow(QtWidgets.QMainWindow):
                     out.append(w.config)
             with open(filepath, "w", encoding="utf-8") as f:
                 json.dump(out, f, indent=2, ensure_ascii=False)
-            QtWidgets.QMessageBox.information(self, "Профиль сохранен", f"Профиль '{name}' успешно сохранен.")
+            self.show_notification("Профиль сохранен", f"Профиль '{name}' успешно сохранен")
 
     def profile_load(self):
         os.makedirs(PROFILES_DIR, exist_ok=True)
@@ -1096,11 +1284,12 @@ class MainWindow(QtWidgets.QMainWindow):
             filepath = os.path.join(PROFILES_DIR, f"{name}.json")
             try:
                 os.remove(filepath)
-                QtWidgets.QMessageBox.information(self, "Удалено", f"Профиль '{name}' удален.")
+                self.show_notification("Удалено", f"Профиль '{name}' удален")
             except Exception as e:
                 QtWidgets.QMessageBox.critical(self, "Ошибка", f"Не удалось удалить: {e}")
 
     def load_state(self):
+        data = None
         if os.path.exists(CONFIG_FILE):
             try:
                 with open(CONFIG_FILE, "r", encoding="utf-8") as f:
@@ -1110,8 +1299,17 @@ class MainWindow(QtWidgets.QMainWindow):
                         data = raw.get("servers", [])
                         self.close_action = raw.get("close_action", "close")
                         self.show_button_text = raw.get("show_button_text", True)
+                        self.autostart_enabled = raw.get("autostart", False)
+                        self.start_minimized = raw.get("start_minimized", False)
+                        self.notifications_enabled = raw.get("notifications", True)
+                        self.custom_icons = raw.get("custom_icons", self.custom_icons)
+
                         self.act_btn_text.setChecked(self.show_button_text)
+                        self.act_autostart.setChecked(self.autostart_enabled)
+                        self.act_start_min.setChecked(self.start_minimized)
+                        self.act_notifications.setChecked(self.notifications_enabled)
                         self.update_buttons_ui()
+                        self.apply_icons()
 
                         if self.close_action == "minimize":
                             self.act_close_min.setChecked(True)
@@ -1137,6 +1335,10 @@ class MainWindow(QtWidgets.QMainWindow):
             json.dump({
                 "close_action": self.close_action,
                 "show_button_text": self.show_button_text,
+                "autostart": self.autostart_enabled,
+                "start_minimized": self.start_minimized,
+                "notifications": self.notifications_enabled,
+                "custom_icons": self.custom_icons,
                 "servers": out
             }, f, indent=2, ensure_ascii=False)
 
@@ -1155,14 +1357,18 @@ class MainWindow(QtWidgets.QMainWindow):
         for i in range(self.tabs.count()):
             w = self.tabs.widget(i)
             if isinstance(w, ServerTab):
-                w.stop_server(timeout=1.5)
+                w.stop_server(timeout=1.5, notify=False)
         if hasattr(self, "tray"):
             self.tray.hide()
         event.accept()
 
 if __name__ == "__main__":
     app = QtWidgets.QApplication(sys.argv)
+    app.setDesktopFileName("server-manager-clean")
     app.setStyle("Fusion")
     win = MainWindow()
-    win.show()
+    if win.start_minimized:
+        win.showMinimized()
+    else:
+        win.show()
     sys.exit(app.exec())
